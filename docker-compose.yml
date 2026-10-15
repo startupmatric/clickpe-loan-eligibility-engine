@@ -1,0 +1,197 @@
+services:
+
+  # --------------------------------------------------------------
+  # Postgres — holds 4 things:
+  #   loan_db  : users, loan_products, matches, upload_batches
+  #   n8n_db   : n8n's own state (workflows, credentials, executions)
+  # These two are separate databases on purpose. Don't merge them.
+  # --------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: loan-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: loan_user
+      POSTGRES_PASSWORD: loan_password
+      POSTGRES_DB: postgres   # just the bootstrap db; the real ones get created in init.sql
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # runs ONCE, on the very first startup with an empty volume.
+      # if you change init.sql later, do `docker compose down -v` to reset.
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loan_user -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+
+  # --------------------------------------------------------------
+  # FastAPI backend — handles CSV upload, validation, user insert,
+  # and pings n8n's webhook. Not much else.
+  # --------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+
+    container_name: loan-backend
+    restart: unless-stopped
+
+    environment:
+      # "postgres" (not localhost) because we're inside the compose network
+      DATABASE_URL: postgresql://loan_user:loan_password@postgres:5432/loan_db
+
+      # same trick: "n8n" is the service name, resolves to the container
+      N8N_WEBHOOK_URL: http://n8n:5678/webhook/ingest-complete
+
+      # CSV files land here; also visible on the host as ./uploads
+      UPLOAD_DIR: /app/uploads
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      # host <-> container sharing so uploaded CSVs survive restarts
+      - ./uploads:/app/uploads
+
+      # live code reload — edit a .py on the host, uvicorn picks it up
+      - ./backend/app:/app/app
+
+      # tests — lets us run pytest inside the container if we want
+      - ./backend/tests:/app/tests
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+
+  # --------------------------------------------------------------
+  # n8n — the orchestrator. Runs 3 workflows:
+  #   A) discovery  : pulls /mock/loan-products, upserts into loan_products
+  #   B) matching   : webhook from backend, SQL pre-filter, writes matches
+  #   C) notify     : every minute, emails unnotified matches, stamps notified_at
+  #
+  # NOTE: this container needs a good chunk of RAM. On Windows Docker
+  # Desktop I had to bump it to 8 GB. With 2 GB it kept OOM-killing
+  # itself mid-request and losing webhook registrations. Painful.
+  # --------------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+
+    container_name: loan-n8n
+    restart: unless-stopped
+
+    environment:
+      # n8n keeps its own state in Postgres (separate db from the app)
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n_db
+      DB_POSTGRESDB_USER: loan_user
+      DB_POSTGRESDB_PASSWORD: loan_password
+
+      # bind to 0.0.0.0 so the port mapping works from the host
+      N8N_HOST: 0.0.0.0
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+
+      # without this, n8n tries to set an HTTPS-only cookie and the
+      # editor refuses to load over plain HTTP. Took me an hour to find.
+      N8N_SECURE_COOKIE: "false"
+
+      # needed to encrypt stored credentials. Change it if you ever
+      # move this off a local dev machine.
+      N8N_ENCRYPTION_KEY: "clickpe-local-development-key-change-this"
+
+      GENERIC_TIMEZONE: Asia/Kolkata
+
+      # Turned off the SaaS-ish stuff. Doesn't change behavior, just
+      # fewer network calls and fewer nags.
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_TEMPLATES_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_HIRING_BANNER_ENABLED: "false"
+
+      # n8n keeps every execution forever by default. On a laptop
+      # that fills up fast. Prune after a day.
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "24"
+
+      # Give the JS engine more heap. Helps when workflows get heavy.
+      NODE_OPTIONS: "--max-old-space-size=2048"
+
+    ports:
+      - "5678:5678"
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+      # handy for keeping exported workflow JSONs around
+      - ./n8n/workflows:/workflows
+
+    healthcheck:
+      # without this Docker can't tell when n8n is actually responding
+      # vs just "container is running but the HTTP server is hung"
+      test: ["CMD-SHELL", "wget -qO- -T 5 http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s   # n8n takes ~60s to boot + run migrations
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+
+  # --------------------------------------------------------------
+  # MailHog — a fake SMTP server with a web inbox.
+  # Any email n8n "sends" ends up here instead of the internet.
+  # Web UI at http://localhost:8025
+  # --------------------------------------------------------------
+  mailhog:
+    image: mailhog/mailhog:latest
+
+    container_name: loan-mailhog
+    restart: unless-stopped
+
+    ports:
+      - "1025:1025"   # SMTP — n8n talks to this
+      - "8025:8025"   # web inbox — you look at this
+
+
+  # --------------------------------------------------------------
+  # Frontend — serves the static HTML UI on port 3000.
+  # Uses nginx:alpine because it's 5 MB and serves files forever
+  # without fuss. The HTML calls http://localhost:8000 (the backend)
+  # directly from the browser, so CORS is handled server-side.
+  # --------------------------------------------------------------
+  frontend:
+    image: nginx:alpine
+
+    container_name: loan-frontend
+    restart: unless-stopped
+
+    ports:
+      - "3000:80"
+
+    volumes:
+      # read-only mount — nginx just serves whatever's in ./frontend
+      - ./frontend:/usr/share/nginx/html:ro
+
+    depends_on:
+      - backend
+
+
+# --------------------------------------------------------------
+# Named volumes. These live in Docker's internal storage, not on
+# your Windows disk path. `docker compose down -v` nukes them.
+# --------------------------------------------------------------
+volumes:
+  postgres_data:
+  n8n_data:

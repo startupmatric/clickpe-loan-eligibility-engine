@@ -1,0 +1,128 @@
+{
+  "name": "A — Loan Product Discovery",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "f9686781-ca82-4153-8376-39fca2e27356",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "url": "http://backend:8000/mock/loan-products",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        128,
+        0
+      ],
+      "id": "19d1453b-a70e-41f3-a721-2b41afe7f0ac",
+      "name": "HTTP Request"
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.first().json;\n\n// Handle both possible shapes:\n//   { body: { products: [...] } }   ← HTTP node with full response\n//   { products: [...] }              ← HTTP node with body only\nconst products = res.body?.products ?? res.products ?? [];\n\nreturn products.map(p => ({ json: p }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        0
+      ],
+      "id": "ebff7f78-90f9-40f4-adb0-e31269217c55",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO loan_products\n  (product_name, provider, interest_rate, min_monthly_income,\n   min_credit_score, min_age, max_age, employment_statuses,\n   eligibility_text, source_url, last_updated)\nVALUES\n  ($1, $2, $3, $4, $5, $6, $7,\n   (SELECT array_agg(x)::text[] FROM jsonb_array_elements_text($8::jsonb) AS t(x)),\n   $9, $10, NOW())\nON CONFLICT (product_name, provider) DO UPDATE\n   SET interest_rate       = EXCLUDED.interest_rate,\n       min_monthly_income  = EXCLUDED.min_monthly_income,\n       min_credit_score    = EXCLUDED.min_credit_score,\n       min_age             = EXCLUDED.min_age,\n       max_age             = EXCLUDED.max_age,\n       employment_statuses = EXCLUDED.employment_statuses,\n       eligibility_text    = EXCLUDED.eligibility_text,\n       source_url          = EXCLUDED.source_url,\n       last_updated        = NOW()\nRETURNING id, product_name;\n",
+        "options": {
+          "queryReplacement": "={{ $json.product_name }}\n{{ $json.provider }}\n{{ $json.interest_rate }}\n{{ $json.min_monthly_income }}\n{{ $json.min_credit_score }}\n{{ $json.min_age }}\n{{ $json.max_age }}\n{{ JSON.stringify($json.employment_statuses) }}\n{{ $json.eligibility_text }}\n{{ $json.source_url }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        576,
+        0
+      ],
+      "id": "cbcf7804-33a9-4b08-b5a4-546d3fa7c034",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "JaUBAWl0NudbqLk5",
+          "name": "Loan DB Local"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "0f9969d5-0c08-4924-861d-ad6525102f56",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a346f177a7717852ac22b4f2da020b046cde64ddd978c4e7a055092b361cac07"
+  },
+  "nodeGroups": [],
+  "id": "iziOzWsipAtlFxos",
+  "tags": []
+}

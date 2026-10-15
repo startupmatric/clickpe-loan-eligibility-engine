@@ -1,0 +1,97 @@
+# AWS deployment reference
+#
+# The take-home runs locally with Docker.
+# This file shows how the same setup could be moved to AWS later.
+#
+# Local                  AWS
+# FastAPI                Lambda
+# uploads/               S3
+# PostgreSQL             RDS PostgreSQL
+# n8n                    EC2 / ECS
+# MailHog                Amazon SES
+
+service: clickpe-loan-eligibility-engine
+
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: ap-south-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 512
+  timeout: 30
+
+  environment:
+    STAGE: ${self:provider.stage}
+    DATABASE_URL: ${ssm:/clickpe/${self:provider.stage}/database-url}
+    N8N_WEBHOOK_URL: ${ssm:/clickpe/${self:provider.stage}/n8n-webhook-url}
+    SES_FROM_ADDRESS: ${ssm:/clickpe/${self:provider.stage}/ses-from}
+
+functions:
+  getUploadUrl:
+    handler: backend.app.handlers.upload_url.handler
+    events:
+      - httpApi:
+          path: /upload-url
+          method: GET
+
+  processCsv:
+    handler: backend.app.handlers.process_csv.handler
+    timeout: 120
+    memorySize: 1024
+    events:
+      - s3:
+          bucket: !Ref UploadsBucket
+          event: s3:ObjectCreated:*
+          rules:
+            - suffix: .csv
+          existing: false
+
+  health:
+    handler: backend.app.main.health_lambda
+    events:
+      - httpApi:
+          path: /health
+          method: GET
+
+  listUsers:
+    handler: backend.app.main.list_users_lambda
+    events:
+      - httpApi:
+          path: /users
+          method: GET
+
+  listProducts:
+    handler: backend.app.main.list_products_lambda
+    events:
+      - httpApi:
+          path: /loan-products
+          method: GET
+
+  listMatches:
+    handler: backend.app.main.list_matches_lambda
+    events:
+      - httpApi:
+          path: /matches
+          method: GET
+
+resources:
+  Resources:
+    UploadsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: !Sub "clickpe-loan-uploads-${AWS::AccountId}-${self:provider.stage}"
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  pythonRequirements:
+    dockerizePip: true
+    slim: true

@@ -1,0 +1,120 @@
+{
+  "name": "B — Matching",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ingest-complete",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "65c123b3-5067-4f4d-b224-575179800074",
+      "name": "Webhook",
+      "webhookId": "c54f319a-7183-4909-8263-ce8fb03c7eb9"
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\n\nfor (const item of $input.all()) {\n  const batchId = item.json.body?.batch_id;\n\n  if (!batchId) {\n    throw new Error(\"batch_id is required\");\n  }\n\n  const uuidRegex =\n    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\n\n  if (!uuidRegex.test(batchId)) {\n    throw new Error(\"Invalid batch_id UUID\");\n  }\n\n  const sql = `\nWITH candidates AS (\n    SELECT\n        u.user_id,\n        u.email,\n        u.monthly_income,\n        u.credit_score,\n        u.employment_status,\n        u.age,\n\n        l.id AS product_id,\n        l.min_monthly_income,\n        l.min_credit_score,\n        l.min_age,\n        l.max_age,\n        l.employment_statuses\n\n    FROM users u\n    CROSS JOIN loan_products l\n\n    WHERE u.upload_batch_id = '${batchId}'::uuid\n      AND u.monthly_income >= l.min_monthly_income\n      AND u.credit_score   >= l.min_credit_score\n      AND u.age            BETWEEN l.min_age AND l.max_age\n      AND (\n          l.employment_statuses IS NULL\n          OR u.employment_status = ANY(l.employment_statuses)\n      )\n),\nscored AS (\n    SELECT\n        user_id,\n        product_id,\n        ROUND(\n            0.50 * LEAST(1.0, (credit_score - min_credit_score)::numeric / 200.0)\n          + 0.30 * LEAST(1.0, (monthly_income - min_monthly_income)::numeric\n                              / NULLIF(min_monthly_income, 0))\n          + 0.20 * (1.0 - ABS(age - ((min_age + max_age) / 2.0))\n                          / NULLIF((max_age - min_age) / 2.0, 0)),\n            2\n        ) * 100 AS match_score,\n        'income>=' || min_monthly_income\n            || ', credit>=' || min_credit_score\n            || ', age ' || min_age || '-' || max_age AS match_reason\n    FROM candidates\n)\nINSERT INTO matches (user_id, product_id, match_score, match_reason)\nSELECT user_id, product_id, match_score, match_reason FROM scored\nON CONFLICT (user_id, product_id) DO UPDATE\n   SET match_score  = EXCLUDED.match_score,\n       match_reason = EXCLUDED.match_reason\nRETURNING user_id, product_id, match_score;\n`;\n\n  out.push({ json: { query: sql, batch_id: batchId } });\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "8677d7a2-d4f7-430a-a085-76dbba73d860",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\":\"matched\",\"batch_id\":\"{{ $('Webhook').item.json.body.batch_id }}\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        672,
+        0
+      ],
+      "id": "f7ae92e3-26b0-4ba9-a724-7c0990d4362d",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.query }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        448,
+        0
+      ],
+      "id": "0badc01d-d102-487f-9a52-c9da4050b680",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "6eNOaDrFcqGpOfua",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "77dee451-6a7d-4300-9335-fa27fcb22120",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a346f177a7717852ac22b4f2da020b046cde64ddd978c4e7a055092b361cac07"
+  },
+  "nodeGroups": [],
+  "id": "Ouq50Wi8dPm6QE7E",
+  "tags": []
+}

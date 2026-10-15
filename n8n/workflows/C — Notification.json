@@ -1,0 +1,167 @@
+{
+  "name": "C — Notification",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "c8c1444f-692a-4607-ba22-3824709a73a9",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n    m.user_id,\n    u.email,\n    json_agg(\n        json_build_object(\n            'product_name',  p.product_name,\n            'provider',      p.provider,\n            'interest_rate', p.interest_rate,\n            'match_score',   m.match_score\n        ) ORDER BY m.match_score DESC\n    ) AS products\nFROM matches m\nJOIN loan_products p ON p.id = m.product_id\nJOIN users u ON u.user_id = m.user_id\nWHERE m.notified_at IS NULL\nGROUP BY m.user_id, u.email\nLIMIT 50;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        224,
+        0
+      ],
+      "id": "502f7f8d-4d85-407f-94ab-0dd08eb6525f",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "6eNOaDrFcqGpOfua",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\n\nfor (const item of $input.all()) {\n  const { user_id, email, products } = item.json;\n\n  const list = products.map((p, i) =>\n    `${i + 1}. ${p.product_name} (${p.provider})\\n` +\n    `   Interest Rate: ${p.interest_rate}% onwards\\n` +\n    `   Match Score: ${p.match_score}/100`\n  ).join(\"\\n\\n\");\n\n  const body =\n`Hi,\n\nBased on your profile, you may be eligible for the following loan products:\n\n${list}\n\nThese are potential matches based on publicly available eligibility criteria.\nFinal approval is subject to the lender's underwriting.\n\nRegards,\nClickPe Loan Eligibility Engine`;\n\n  out.push({\n    json: {\n      user_id,\n      email,\n      subject: \"Your loan eligibility matches\",\n      body\n    }\n  });\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        0
+      ],
+      "id": "daeaeb2f-8884-4c87-b2a4-f7d9ccbe6a19",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "fromEmail": "no-reply@clickpe.local",
+        "toEmail": "={{ $json.email }}\n",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.body }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        576,
+        0
+      ],
+      "id": "9ac15fc4-404b-421e-8b87-1bcc9f158793",
+      "name": "Send an Email",
+      "webhookId": "c99d08c3-cfe7-481f-a522-756b4d64fe2c",
+      "credentials": {
+        "smtp": {
+          "id": "SjSrojwvylZTqBp8",
+          "name": "SMTP account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE matches\n   SET notified_at = NOW()\n WHERE user_id = $1\n   AND notified_at IS NULL;",
+        "options": {
+          "queryReplacement": "={{ $('Code in JavaScript').item.json.user_id }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        800,
+        0
+      ],
+      "id": "2ec132f4-3a87-430f-809a-6d88797677a3",
+      "name": "Execute a SQL query1",
+      "credentials": {
+        "postgres": {
+          "id": "JaUBAWl0NudbqLk5",
+          "name": "Loan DB Local"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Send an Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send an Email": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "46c285d8-ed08-4163-8680-364a5ce001b8",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a346f177a7717852ac22b4f2da020b046cde64ddd978c4e7a055092b361cac07"
+  },
+  "nodeGroups": [],
+  "id": "4GYjc0tBO6cG5RJp",
+  "tags": []
+}
