@@ -1,4 +1,4 @@
-# ClickPe — Loan Eligibility Engine
+# ClickPe Loan Eligibility Engine
 
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
@@ -6,47 +6,36 @@
 ![n8n](https://img.shields.io/badge/n8n-workflows-EA4B71?logo=n8n&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)
 
-A take-home for the ClickPe SDE Intern role. Reads a CSV of applicants,
-matches them against a catalog of loan products, and emails everyone who
-qualifies — all locally, on one `docker compose up -d`.
+Upload a CSV of applicants. The engine checks each one against a catalog of loan products, scores the matches, and emails everyone who qualifies.
 
-No AWS account needed. Production mapping is included as `serverless.yml`
-for reference.
+It is a take-home for the ClickPe SDE Intern role. The whole stack runs locally with one `docker compose up -d`. No AWS account is needed, and `infrastructure/serverless.yml` shows how it maps to AWS.
 
----
-
-## What it does
-
-You upload a CSV. The pipeline takes it from there.
+## How it works
 
 ```
 CSV file
-   │
-   ▼
-FastAPI /upload — validates every row, stores users, fires a webhook
-   │
-   ▼
-PostgreSQL — users, loan_products, matches, upload_batches
-   │
-   ▼
-n8n Workflow B — one SQL query filters, scores, writes matches
-   │
-   ▼
-n8n Workflow C — every minute, emails unnotified matches, marks them done
-   │
-   ▼
-MailHog inbox — 4 emails, one per matched applicant
+  │
+  ▼
+FastAPI  POST /upload       validates every row, stores users, calls the n8n webhook
+  │
+  ▼
+PostgreSQL                  users · loan_products · matches · upload_batches
+  │
+  ▼
+n8n Workflow B              one SQL query filters, scores and writes matches
+  │
+  ▼
+n8n Workflow C (every 1 min) emails unnotified matches, then marks them notified
+  │
+  ▼
+MailHog inbox               one email per matched applicant
 ```
 
-Every row that fails validation is reported by line number. Nothing gets
-silently dropped.
-
----
+Rows that fail validation are reported by line number. Nothing is dropped silently.
 
 ## Quick start
 
-You need Docker Desktop, with at least 6 GB of memory allocated to it.
-(8 GB if you're on Windows — n8n is heavier there than on Linux.)
+**Requirements:** Docker Desktop with at least 6 GB of memory (8 GB on Windows, where n8n is heavier).
 
 ```bash
 git clone <your-repo-url> clickpe-loan-engine
@@ -54,50 +43,42 @@ cd clickpe-loan-engine
 docker compose up -d
 ```
 
-First boot takes about a minute. n8n runs its database migrations the
-first time, and those aren't fast.
+The first start takes about a minute while n8n runs its database migrations.
 
-### Check it came up
+**Check that it is running:**
 
 ```bash
-docker compose ps
-# 5 containers: postgres, backend, n8n, mailhog, frontend
-
+docker compose ps          # 5 containers: postgres, backend, n8n, mailhog, frontend
 curl http://localhost:8000/health
 # {"status":"healthy","database":"connected"}
 ```
 
-### Open these
+**Open the services:**
 
-| What | Where |
+| Service | URL |
 |---|---|
 | Dashboard | http://localhost:3000 |
-| FastAPI Swagger | http://localhost:8000/docs |
+| API docs (Swagger) | http://localhost:8000/docs |
 | n8n | http://localhost:5678 |
 | MailHog inbox | http://localhost:8025 |
 
 ### Import the n8n workflows
 
-This part is manual — n8n doesn't read workflow files from the filesystem.
+n8n does not read workflow files from disk, so this step is manual:
 
-1. Open http://localhost:5678
-2. Set up the owner account (whatever email/password you want)
-3. Left sidebar → **Workflows**
-4. Top-right → **Import from File**
-5. Import each of the three files from `n8n/workflows/`
-6. Reattach the `Loan DB Local` Postgres credential on each Postgres node
-7. Flip **Active** on all three
+1. Open http://localhost:5678 and create the owner account (any email and password).
+2. Go to **Workflows** in the left sidebar.
+3. Choose **Import from File** and import all three files from `n8n/workflows/`.
+4. On each Postgres node, reattach the `Loan DB Local` credential.
+5. Switch **Active** on for all three workflows.
 
-The `n8n/workflows/README.md` walks through the credentials and fixes for
-common mistakes. It's short.
+`n8n/workflows/README.md` covers the credential settings and common mistakes.
 
 ### Run the demo
 
 ```bash
 curl -X POST -F "file=@data/sample_users.csv" http://localhost:8000/upload
 ```
-
-Response:
 
 ```json
 {
@@ -109,162 +90,105 @@ Response:
 }
 ```
 
-Then open http://localhost:3000. The dashboard shows applicants, matches,
-and emails live.
+Then open http://localhost:3000 to see applicants, matches and notifications. Four of the five sample applicants match at least one product, so MailHog receives four emails. The fifth (income 15,000, credit score 540) matches nothing and is correctly absent from the results.
 
----
+## Matching without an LLM
 
-## The interesting part
+The assignment calls this the "optimization treasure hunt". Here is how this repo handles it.
 
-The assignment calls this the "Optimization Treasure Hunt". Here's what it
-means in this codebase.
+**The naive approach.** With 1,000 applicants and 30 products there are 30,000 eligibility decisions. Sending each one to an LLM means 30,000 API calls per upload, with high cost, high latency, non-deterministic answers, and no way to explain a match.
 
-### The naive approach
-
-For 1,000 applicants and 30 loan products:
-
-```
-1,000 × 30 = 30,000 eligibility decisions
-```
-
-If you hand each decision to an LLM, that's 30,000 API calls per upload.
-Cost, latency, non-determinism, and no way to explain why a specific match
-was made.
-
-### What actually happens
-
-**One SQL query does the filtering.** Before any business logic runs, four
-indexed predicates in Postgres eliminate candidates that can't possibly match:
+**What this repo does.** Eligibility is a set of rules over numbers and categories, so Postgres decides it in one query:
 
 ```sql
 WHERE u.monthly_income >= l.min_monthly_income
   AND u.credit_score   >= l.min_credit_score
-  AND u.age            BETWEEN l.min_age AND l.max_age
+  AND u.age BETWEEN l.min_age AND l.max_age
   AND (l.employment_statuses IS NULL
        OR u.employment_status = ANY(l.employment_statuses))
 ```
 
-The `CROSS JOIN` never materializes. Postgres uses the indexes on
-`users(monthly_income, credit_score, age, employment_status)` and
-`loan_products(min_monthly_income, min_credit_score, min_age, max_age)` to
-skip most pairs entirely.
+Only pairs that pass are scored and stored. Indexes on the eligibility columns of `users` and `loan_products` keep the join fast as data grows. On the 5-applicant sample, 30 candidate pairs reduce to 21 matches.
 
-On a 1,000-user workload, this typically removes **over 85%** of candidates
-before scoring. On the 5-user sample in this repo, 4 out of 5 users match
-something and one (carol, income 15k, credit 540) matches nothing at all.
-She's correctly absent from the results.
+**Scoring is a readable formula.**
 
-You can see this in the dashboard — the **Matching Funnel** shows candidates
-in, candidates passed, candidates notified, as three bars. On the sample
-data it reads 30 → 21 → 21 (before Workflow C runs).
-
-**Scoring is deterministic.**
-
-```sql
-match_score = 100 × (
-    0.50 × credit_headroom
-  + 0.30 × income_headroom
-  + 0.20 × age_fit
-)
+```
+match_score = 100 × (0.50 × credit_headroom
+                   + 0.30 × income_headroom
+                   + 0.20 × age_fit)
 ```
 
-Nobody has to trust a black box. Every score is a single SQL expression you
-can read.
+Every score comes from one SQL expression, so any match can be explained and reproduced.
 
-**The LLM stays where it belongs.** Not in the per-user path. The
-architecture reserves it for the product-normalization layer — parsing a
-scraped eligibility blurb into structured criteria, once per product, never
-per user-product pair. That's the only place where semantic reasoning adds
-value over a deterministic rule.
+**Where an LLM would fit.** It would not run per applicant. The design reserves it for turning scraped eligibility text into structured criteria, once per product (see [Known limitations](#known-limitations)).
 
-### What that gets you
-
-| Metric | LLM-per-pair | This system |
+| | LLM per pair | This system |
 |---|---|---|
-| Evaluations per 1,000-user upload | 30,000 | under 2,000 |
-| LLM calls per upload | 30,000 | 0 |
-| Cost per upload | High | Zero |
+| LLM calls per 1,000-applicant upload | 30,000 | 0 |
+| Cost of matching | High | None beyond the database |
 | Reproducible | No | Yes |
-| Auditable | No | Yes — the SQL is the source of truth |
+| Auditable | No | Yes, the SQL is the source of truth |
 
----
+## Dashboard
+
+A single HTML file in `frontend/index.html`, with no framework and no build step. It includes:
+
+- Overview with live counts and a matching funnel (candidate pairs, eligible matches, notified).
+- Applicants, Loan Products and Matches tables with search and loading states.
+- Drag-and-drop CSV upload with per-batch results.
+- System health indicators for the API and database.
+- Light and dark themes, saved between visits.
+
+A framework would add overhead without benefit for an internal tool with a few tables and one form.
 
 ## API
 
-| Method | Path | What it does |
+| Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | DB connectivity check |
-| `POST` | `/upload` | CSV → validate → users → webhook |
-| `GET` | `/batches/{id}` | Batch audit lookup |
+| `GET` | `/health` | Database connectivity check |
+| `POST` | `/upload` | CSV → validate → store users → trigger matching |
+| `GET` | `/batches/{id}` | Look up an upload batch |
 | `GET` | `/users` | List applicants |
-| `GET` | `/loan-products` | List catalog |
+| `GET` | `/loan-products` | List the product catalog |
 | `GET` | `/matches` | List matches |
-| `GET` | `/mock/loan-products` | Static catalog (stands in for real crawling) |
+| `GET` | `/mock/loan-products` | Static catalog standing in for a real crawler |
 | `POST` | `/dev/rematch/{id}` | Re-run matching for a batch |
 
----
+## Database
 
-## Schema
+Four tables, defined in `postgres/init.sql`:
 
-Four tables. See `postgres/init.sql` for the full definitions.
+| Table | Purpose |
+|---|---|
+| `upload_batches` | One row per upload: filename, status, counts, timestamps. Use it to trace what happened. |
+| `users` | One row per applicant: business key, eligibility fields, and the batch that brought them in. |
+| `loan_products` | The catalog: eligibility thresholds, source URL, last updated. Unique on `(product_name, provider)`. |
+| `matches` | One row per user and product that passed: score, reason, `notified_at`. Unique on `(user_id, product_id)`. |
 
-- **`upload_batches`** — one row per CSV upload. Filename, status, counts,
-  timestamps. This is how you trace what happened and when.
-- **`users`** — one row per applicant. Business key, eligibility fields,
-  foreign key to the batch that brought them in.
-- **`loan_products`** — the catalog. Eligibility thresholds, source URL,
-  last updated. Unique on `(product_name, provider)`.
-- **`matches`** — one row per user-product pair that passed. Score, reason,
-  `notified_at`. Unique on `(user_id, product_id)`.
-
-Both `matches` and `users` have `ON CONFLICT DO UPDATE` behavior — re-running
-anything is safe. It updates instead of duplicating.
-
----
+Writes to `users` and `matches` use `ON CONFLICT DO UPDATE`, so re-running any step updates rows instead of duplicating them.
 
 ## n8n workflows
 
-Three of them, exported to `n8n/workflows/`:
-
-| File | Trigger | What it does |
+| File | Trigger | Job |
 |---|---|---|
-| `workflow-a-loan-discovery.json` | Schedule (6h) | Fetch products, upsert into `loan_products` |
-| `workflow-b-matching.json` | Webhook | SQL pre-filter, score, insert matches |
-| `workflow-c-notification.json` | Schedule (1m) | Fetch unnotified, email, mark notified |
+| `workflow-a-loan-discovery.json` | Every 6 hours | Fetch products and upsert into `loan_products` |
+| `workflow-b-matching.json` | Webhook | Pre-filter with SQL, score, insert matches |
+| `workflow-c-notification.json` | Every 1 minute | Email unnotified matches and mark them notified |
 
-Import instructions and credential details in `n8n/workflows/README.md`.
+Workflow A reads from `/mock/loan-products`, which returns a 6-product catalog in the shape a real crawler would produce. The flow already keeps `source_url` for provenance, so moving to real bank pages means changing the URL and adding an HTML-parsing step.
 
-**About Workflow A.** It currently pulls from `/mock/loan-products`, an
-endpoint that returns the 6-product catalog as JSON. The structure is the
-same as a real crawler would produce — schedule → HTTP fetch → normalize →
-Postgres upsert with `source_url` preserved for provenance. Swapping in 2–3
-real bank product pages is a URL change and an HTML-parsing step, not a
-redesign. I've written it up in the [What I'd do next](#what-id-do-next)
-section rather than claiming it works.
+## From local to AWS
 
----
-
-## Local → AWS
-
-`infrastructure/serverless.yml` has the mapping. Short version:
-
-| Local Docker | AWS |
+| Local | AWS |
 |---|---|
 | FastAPI `/upload` | API Gateway + Lambda |
 | `uploads/` volume | S3 bucket |
-| `docker compose up -d` | `serverless deploy` |
 | PostgreSQL container | RDS PostgreSQL |
-| n8n container | n8n on EC2 / ECS |
+| n8n container | n8n on EC2 or ECS |
 | MailHog | Amazon SES |
+| `docker compose up -d` | `serverless deploy` |
 
-The service boundaries are identical. The CSV parser, validation rules,
-matching SQL, n8n workflows, and frontend don't change.
-
-The `serverless.yml` is a real deploy config, not a sketch. It uses SSM
-Parameter Store for secrets, presigned S3 URLs to keep the CSV out of
-Lambda's payload limits, and an S3 event trigger for CSV processing.
-
----
+The service boundaries stay the same, so the CSV parser, validation rules, matching SQL, workflows and dashboard do not change. `infrastructure/serverless.yml` is a deployable config. It keeps secrets in SSM Parameter Store, uses presigned S3 URLs to avoid Lambda payload limits, and starts processing from an S3 event.
 
 ## Tests
 
@@ -275,142 +199,79 @@ python -m pytest tests -v
 
 **Unit tests** (`test_csv_processor.py`) cover the CSV parser:
 
-- Valid file → all rows returned
-- Missing required column → schema error
-- Invalid email → row error, other rows still pass
-- Credit score out of range → row error
-- Age out of range → row error
-- Empty file → schema error
-- Employment status normalized to lowercase
-- Mixed valid and invalid rows
+- A valid file returns all rows.
+- A missing required column gives a schema error.
+- An invalid email, credit score or age fails only that row.
+- An empty file gives a schema error.
+- Employment status is normalized to lowercase.
+- Files with mixed valid and invalid rows are handled row by row.
 
-**Integration tests** (`test_api.py`) hit the running FastAPI service:
+**Integration tests** (`test_api.py`) call the running service:
 
-- `GET /health`, `GET /`, `GET /users`, `GET /loan-products`, `GET /matches`
-- `POST /upload` with valid CSV, missing columns, non-CSV file, mixed rows
+- `GET /health`, `/`, `/users`, `/loan-products` and `/matches`.
+- `POST /upload` with a valid CSV, missing columns, a non-CSV file, and mixed rows.
 
-These skip automatically if the backend isn't running, so you can run the
-whole suite either way.
-
----
+Integration tests skip automatically when the backend is not running.
 
 ## Design decisions
 
-**Why deterministic SQL for matching.** Eligibility is rules over numbers
-and categories. An LLM adds cost, latency, and non-determinism to a problem
-that doesn't need it. The LLM belongs on unstructured input — scraped
-eligibility text — where a rule can't help.
+**Deterministic SQL for matching.** Eligibility is rules over numbers and categories. An LLM adds cost, latency and non-determinism to a problem that does not need them.
 
-**Why `notified_at` instead of a notifications table.** A nullable timestamp
-is enough. `WHERE notified_at IS NULL` filters the work; setting it after
-send prevents duplicates. A separate table would need joins and give you
-nothing extra.
+**`notified_at` instead of a notifications table.** A nullable timestamp is enough. `WHERE notified_at IS NULL` selects the work, and setting it after sending prevents duplicates.
 
-**Why n8n.** The assignment specifies self-hosted n8n. It has a Postgres
-node, a webhook trigger, and an SMTP node built in. Celery or Airflow would
-be more code for the same result.
+**n8n for orchestration.** The assignment specifies self-hosted n8n, which has Postgres, webhook and SMTP nodes built in. Celery or Airflow would mean more code for the same result.
 
-**Why the CSV goes through the API locally.** Docker Compose runs a
-self-contained stack. `POST /upload` writes the file to a mounted volume and
-records the logical S3 key in `upload_batches`. In production the presigned
-URL flow in `serverless.yml` sends the CSV straight to S3. Same boundary,
-different transport.
+**Upload through the API locally.** `POST /upload` saves the file to a mounted volume and records the logical S3 key in `upload_batches`. In production, presigned URLs send the CSV straight to S3. The boundary is the same and only the transport differs.
 
-**Why the webhook call is failure-isolated.** The batch is recorded as
-`completed` **before** the n8n webhook is fired. If n8n is briefly
-unreachable, the upload still succeeds and the batch is traceable. The
-request does wait up to 10 seconds for the webhook response, so it's not
-strictly fire-and-forget — it's failure-isolated.
-
-**Why no framework on the frontend.** It's a single HTML file with inline
-CSS and JS. 22 KB, no build step, first paint under 100 ms. For an internal
-ops dashboard with a handful of tables and a form, React would be
-overhead without payoff.
-
----
+**Failure-isolated webhook.** The batch is saved as `completed` before the n8n webhook is called. If n8n is briefly down, the upload still succeeds and can be traced. The request waits up to 10 seconds for the webhook, so this is failure isolation, not fire-and-forget.
 
 ## Known limitations
 
-**The crawler is mocked.** Workflow A reads from `/mock/loan-products`
-instead of scraping real bank pages. The data shape is identical to what a
-real crawler would produce — see the note in the n8n section.
+- **The crawler is mocked.** Workflow A uses `/mock/loan-products`, not real bank pages.
+- **The LLM is not connected.** The product-normalization step is designed but needs an LLM credential and one extra node in Workflow A.
+- **n8n needs memory on Windows.** With under 6 GB allocated to Docker, n8n can restart under load and lose its webhook registrations. 2 GB is enough on Linux.
+- **CORS is open.** `allow_origins=["*"]` is for local development. Restrict it to the frontend origin in production.
+- **No API authentication.** This is a local demo. Add API keys or OAuth before exposing it.
 
-**The LLM isn't wired in.** The design reserves a normalization step for
-it. Implementing it needs an LLM credential and one extra node in Workflow
-A. This is the honest state of the repo.
+## What I would do next
 
-**n8n needs headroom on Windows.** Under 6 GB allocated to Docker, n8n may
-restart under load and lose webhook registrations. On Linux it's fine at
-2 GB.
+1. Add LLM normalization to Workflow A (one node, about 30 lines).
+2. Replace the mock catalog with real crawling of 2–3 bank product pages.
+3. Add an idempotency key to `POST /upload`, so re-uploading a file returns the same batch ID.
+4. Write end-to-end tests that start the stack with `docker compose`, upload a CSV, and verify matches and emails.
+5. Move database credentials and the n8n encryption key to SSM Parameter Store or Secrets Manager.
+6. Add CloudWatch alarms for webhook failure rate and SES bounce rate.
 
-**CORS is wide open.** `allow_origins=["*"]` for local development. Restrict
-to the frontend origin in production. Called out in the deploy notes too.
-
-**No auth on the API.** Local demo, not a deployment. Add API keys or
-OAuth before putting this anywhere public.
-
----
-
-## What I'd do next
-
-In rough priority order:
-
-1. Wire the LLM normalization into Workflow A. One node, ~30 lines.
-2. Replace `/mock/loan-products` with real crawling of 2–3 bank product
-   pages. The extraction and upsert logic doesn't change.
-3. Add an idempotency key to `POST /upload` so re-uploading the same file
-   returns the same batch ID instead of creating a new one.
-4. End-to-end tests using `docker compose` + pytest — spin up the stack,
-   upload a CSV, verify matches and emails without mocking.
-5. Move Postgres credentials and the n8n encryption key to SSM Parameter
-   Store or AWS Secrets Manager.
-6. CloudWatch alarms on webhook failure rate and SES bounce rate.
-
----
-
-## Repo layout
+## Repository layout
 
 ```
 clickpe-loan-engine/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              FastAPI app, upload endpoint, read APIs
-│   │   ├── csv_processor.py     validation rules
-│   │   ├── postgres_service.py  DB inserts and batch tracking
-│   │   ├── n8n_client.py        webhook client
-│   │   ├── loan_catalog.py      6-product mock catalog
-│   │   ├── emailer.py           SMTP helper
-│   │   ├── db.py                psycopg2 connection pool
-│   │   └── config.py            env config
+│   │   ├── main.py               FastAPI app, upload endpoint, read APIs
+│   │   ├── csv_processor.py      validation rules
+│   │   ├── postgres_service.py   database inserts and batch tracking
+│   │   ├── n8n_client.py         webhook client
+│   │   ├── loan_catalog.py       6-product mock catalog
+│   │   ├── emailer.py            SMTP helper
+│   │   ├── db.py                 psycopg2 connection pool
+│   │   └── config.py             environment config
 │   ├── tests/
 │   │   ├── test_csv_processor.py
 │   │   └── test_api.py
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── frontend/
-│   └── index.html               operations dashboard
-├── n8n/
-│   ├── workflows/
-│   │   ├── workflow-a-loan-discovery.json
-│   │   ├── workflow-b-matching.json
-│   │   ├── workflow-c-notification.json
-│   │   └── README.md            import instructions
-├── postgres/
-│   └── init.sql                 schema
-├── infrastructure/
-│   ├── serverless.yml           AWS deployment reference
-│   └── README.md                local → AWS mapping
-├── data/
-│   └── sample_users.csv         test data
-├── uploads/                     CSV landing (runtime, gitignored)
-├── docs/
-│   └── architecture.md
+│   └── index.html                operations dashboard
+├── n8n/workflows/                three workflow exports + import guide
+├── postgres/init.sql             schema
+├── infrastructure/               serverless.yml + local-to-AWS guide
+├── data/sample_users.csv         test data
+├── uploads/                      CSV landing folder (runtime, gitignored)
+├── docs/architecture.md
 ├── docker-compose.yml
-├── .gitignore
 └── README.md
 ```
-
----
 
 ## License
 
